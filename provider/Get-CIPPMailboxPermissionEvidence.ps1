@@ -55,8 +55,21 @@ function Get-CIPPMailboxPermissionEvidence {
         $Commands.Add([ordered]@{ name = $Name; status = 'complete'; httpStatus = 200; rowCount = $Rows.Count; pageCount = 1 })
         return ,$Rows
     }
+    function Test-EvidenceTargetReference {
+        param([object]$Value)
+        return ($Value -is [string] -and $Value.Length -gt 0 -and $Value.Length -le 1024 -and $Value -ceq $Value.Trim() -and $Value -notmatch '[\x00-\x1f\x7f-\x9f*?\[\]]')
+    }
+    function Get-EvidenceMailboxLocators {
+        param([object]$Row)
+        $Locators = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        foreach ($Value in @($Row.Name, $Row.Alias, $Row.PrimarySmtpAddress)) {
+            if (Test-EvidenceTargetReference $Value) { $null = $Locators.Add($Value) }
+        }
+        return ,$Locators
+    }
     try {
-        $MailboxSelect = 'ExternalDirectoryObjectId,ExchangeGuid,Guid,DistinguishedName,PrimarySmtpAddress,RecipientTypeDetails'
+        # Name/Alias stay internal: lookup locators are not immutable identity proof or response fields.
+        $MailboxSelect = 'ExternalDirectoryObjectId,ExchangeGuid,Guid,DistinguishedName,PrimarySmtpAddress,RecipientTypeDetails,Name,Alias'
         $Mailboxes = Read-EvidenceCommand -Name 'Get-Mailbox' -Identity $Mailbox -Cap 1 -Select $MailboxSelect
         $Subjects = Read-EvidenceCommand -Name 'Get-Recipient' -Identity $SubjectId -Cap 1 -Select 'ExternalDirectoryObjectId,Guid,Sid,RecipientTypeDetails,PrimarySmtpAddress'
         if ($Mailboxes.Count -ne 1 -or $Subjects.Count -ne 1) { throw 'identity_unverified' }
@@ -70,15 +83,23 @@ function Get-CIPPMailboxPermissionEvidence {
         $Witness = [ordered]@{ objectId = "$($M.ExternalDirectoryObjectId)".ToLowerInvariant(); exchangeGuid = "$($M.ExchangeGuid)".ToLowerInvariant(); recipientGuid = "$($M.Guid)".ToLowerInvariant(); distinguishedName = if ("$($M.DistinguishedName)" -match '^CN=.{1,1020}$') { "$($M.DistinguishedName)" } else { $null }; primarySmtpAddress = "$($M.PrimarySmtpAddress)".ToLowerInvariant(); type = "$($M.RecipientTypeDetails)" }
         # RecipientPermission Identity is a recipient GUID, not the mailbox-store ExchangeGuid.
         $Aces = Read-EvidenceCommand -Name 'Get-RecipientPermission' -Identity $Witness.recipientGuid -Cap 100 -Select ''
+        $InitialLocators = Get-EvidenceMailboxLocators $M
+        $UnresolvedTargets = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
         $Entries = @(foreach ($Ace in $Aces) {
-            $NativeTarget = if ($null -ne $Ace.Identity) { "$($Ace.Identity)" } else { $null }
-            if (-not $NativeTarget -or ($NativeTarget -ine $Witness.recipientGuid -and (-not $Witness.distinguishedName -or $NativeTarget -ine $Witness.distinguishedName))) { throw 'target_unverified' }
+            # Never coerce an unproven JSON object/array into an Exchange identity string.
+            $NativeTarget = $Ace.Identity
+            if (-not (Test-EvidenceTargetReference $NativeTarget)) { throw 'target_unverified' }
+            if (-not [StringComparer]::OrdinalIgnoreCase.Equals($NativeTarget, $Witness.recipientGuid) -and (-not $Witness.distinguishedName -or -not [StringComparer]::OrdinalIgnoreCase.Equals($NativeTarget, $Witness.distinguishedName))) {
+                if (-not $InitialLocators.Contains($NativeTarget)) { throw 'target_unverified' }
+                $null = $UnresolvedTargets.Add($NativeTarget)
+                if ($UnresolvedTargets.Count -gt 1) { throw 'target_unverified' }
+            }
             $Trustee = if ($null -ne $Ace.Trustee) { "$($Ace.Trustee)" } else { $null }
             if ($Trustee -and $Trustee.Length -gt 256) { throw 'reader_limit' }
             $Rights = @($Ace.AccessRights | ForEach-Object { "$_" })
             if ($Rights.Count -gt 8 -or @($Rights | Where-Object { $_.Length -gt 64 }).Count) { throw 'reader_limit' }
             [ordered]@{
-                targetIdentity = $NativeTarget
+                targetIdentity = $null # Filled only after the final native immutable witness matches.
                 trustee = $Trustee
                 accessRights = $Rights
                 accessControlType = if ($null -ne $Ace.AccessControlType) { "$($Ace.AccessControlType)" } else { $null }
@@ -86,9 +107,14 @@ function Get-CIPPMailboxPermissionEvidence {
                 inheritanceType = if ($null -ne $Ace.InheritanceType) { "$($Ace.InheritanceType)" } else { $null }
             }
         })
-        # Covers successful-empty reads too; never infer target existence from the requested argument.
-        $FinalMailbox = Read-EvidenceCommand -Name 'Get-Mailbox' -Identity $Witness.recipientGuid -Cap 1 -Select $MailboxSelect
-        if ($FinalMailbox.Count -ne 1 -or "$($FinalMailbox[0].ExternalDirectoryObjectId)" -ine $Witness.objectId -or "$($FinalMailbox[0].Guid)" -ine $Witness.recipientGuid -or "$($FinalMailbox[0].ExchangeGuid)" -ine $Witness.exchangeGuid -or "$($FinalMailbox[0].PrimarySmtpAddress)" -ine $Witness.primarySmtpAddress -or "$($FinalMailbox[0].RecipientTypeDetails)" -cne $Witness.type -or ($Witness.distinguishedName -and "$($FinalMailbox[0].DistinguishedName)" -ine $Witness.distinguishedName)) { throw 'target_changed' }
+        # Reuse read4 for the single corroborated locator. No extra command, query-only proof or retry.
+        $FinalIdentity = if ($UnresolvedTargets.Count -eq 1) { @($UnresolvedTargets)[0] } else { $Witness.recipientGuid }
+        $FinalMailbox = Read-EvidenceCommand -Name 'Get-Mailbox' -Identity $FinalIdentity -Cap 1 -Select $MailboxSelect
+        if ($FinalMailbox.Count -ne 1 -or "$($FinalMailbox[0].ExternalDirectoryObjectId)" -ine $Witness.objectId -or "$($FinalMailbox[0].Guid)" -ine $Witness.recipientGuid -or "$($FinalMailbox[0].ExchangeGuid)" -ine $Witness.exchangeGuid -or "$($FinalMailbox[0].PrimarySmtpAddress)" -ine $Witness.primarySmtpAddress -or "$($FinalMailbox[0].RecipientTypeDetails)" -cne $Witness.type -or -not [StringComparer]::OrdinalIgnoreCase.Equals($FinalMailbox[0].DistinguishedName, $Witness.distinguishedName)) { throw 'target_changed' }
+        # Nonexistent Identity may return all objects. Matching the initial/final native locator AND
+        # all immutable witness fields prevents accepting that fallthrough, even for a one-row tenant.
+        if ($UnresolvedTargets.Count -eq 1 -and -not (Get-EvidenceMailboxLocators $FinalMailbox[0]).Contains($FinalIdentity)) { throw 'target_changed' }
+        foreach ($Entry in $Entries) { $Entry.targetIdentity = $Witness.recipientGuid }
         if ([DateTimeOffset]::UtcNow -ge $Deadline) { throw 'reader_timeout' }
         $Sid = if ("$($S.Sid)".Length -le 184 -and "$($S.Sid)" -match '^S-1-\d+(?:-\d+)+$') { "$($S.Sid)" } else { $null }
         $RecipientGuid = if ("$($S.Guid)" -match $GuidPattern -and "$($S.Guid)" -ne [guid]::Empty.ToString()) { "$($S.Guid)".ToLowerInvariant() } else { $null }

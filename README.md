@@ -1,10 +1,16 @@
 # CIPP mailbox evidence reader
 
-Local distribution proposal. Repository creation, public source sharing, package publication and installation require separate owner approval. This packet performs none of them.
+Source and build recipe for an independently maintained CIPP provider overlay. Published artifacts require independent source/image verification before installation and consuming-application activation.
 
 This additive provider overlay introduces `GET /api/ListMailboxPermissionEvidence` under the existing `Exchange.Mailbox.Read` role. It preserves the legacy permission endpoint. Four native reads retain mailbox/subject identity, native Send As entries and completeness witnesses. Direct observations do not establish effective access, approval or permission to change access. Existing CIPP authorization and token custody remain in control.
 
 Modification notice, 2026-11-03: this independently maintained overlay adds the two provider functions, the structured operation/profile and the pinned module-build recipe. Preserve upstream notices and the unmodified GNU AGPLv3 text in `LICENSE.upstream.md`. The official upstream project is [CyberDrain/CIPP](https://github.com/CyberDrain/CIPP).
+
+Modification notice, 2026-11-04: native target references are corroborated before response identity normalization.
+
+ACE target references must be bounded plain native strings. A witnessed recipient GUID or DN is checked directly. At most one other distinct reference may use the fourth Get-Mailbox read for resolution, after matching the initial mailbox's safe native Name, Alias or primary SMTP locator. The final native record must repeat that locator and exactly match the initial nonzero object ID, recipient GUID, ExchangeGuid, primary SMTP, SharedMailbox type and DN (including null). Mutable locator equality and query scoping alone never establish identity. This also guards against the documented nonexistent-Identity fallthrough to an unfiltered read. The native ResultSize2 sentinel permits only one accepted target row.
+
+Only after final native corroboration are response targetIdentity values canonicalized to the witnessed recipient GUID. Name/Alias and unresolved tokens remain internal and are never response fields or logs. Objects/arrays/nulls, unsafe strings, multiple unresolved targets, missing/ambiguous/foreign/changed results and timeouts refuse without an envelope. Empty/direct-only reads still revalidate by the known recipient GUID. The v1 response shape, four-command ledger, original eight-second deadline, 100-ACE and response-size limits are unchanged. This is not evidence of the actual failed live target's representation or successful installed acceptance.
 
 ## Contents and fixed inputs
 
