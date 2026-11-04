@@ -1,0 +1,174 @@
+name: Reviewed mailbox reader distribution
+
+on:
+  workflow_dispatch:
+    inputs:
+      reviewed_ref:
+        description: Exact independently reviewed companion source commit
+        type: string
+        required: true
+      publish:
+        description: Owner-approved package publication after private build and source-access review
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.repository == 'manny026ai/cipp-mailbox-reader'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      REVIEWED_REF: ${{ inputs.reviewed_ref }}
+      DISPATCH_SHA: ${{ github.sha }}
+      WORKFLOW_SHA: ${{ github.workflow_sha }}
+    outputs:
+      source_ref: ${{ steps.record.outputs.source_ref }}
+      archive_sha: ${{ steps.record.outputs.archive_sha }}
+      image_id: ${{ steps.record.outputs.image_id }}
+      profile_id: ${{ steps.record.outputs.profile_id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.reviewed_ref }}
+          persist-credentials: false
+      - name: Verify exact reviewed source and generic file boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$REVIEWED_REF" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$DISPATCH_SHA" == "$REVIEWED_REF" && "$WORKFLOW_SHA" == "$REVIEWED_REF" ]]
+          [[ "$(git rev-parse HEAD)" == "$REVIEWED_REF" ]]
+          [[ -z "$(git status --porcelain)" ]]
+          python3 - <<'PY'
+          import subprocess
+          allowed = sorted(['README.md', '.github/workflows/distribution.yml', 'Dockerfile.overlay', 'prepare-context.ps1', 'openapi-operation.json', 'LICENSE.upstream.md', 'provider/Get-CIPPMailboxPermissionEvidence.ps1', 'provider/Invoke-ListMailboxPermissionEvidence.ps1'])
+          actual = sorted(subprocess.check_output(['git', 'ls-files'], text=True).splitlines())
+          assert actual == allowed, 'Only the eight reviewed generic source paths may be tracked'
+          assert subprocess.check_output(['git', 'hash-object', 'LICENSE.upstream.md'], text=True).strip() == '29ebfa545f5580919a4e884d7014d7a3eb2df762'
+          PY
+      - name: Prepare pinned public upstream and minimal context
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $source = Join-Path $env:RUNNER_TEMP 'official-cipp'
+          git init $source
+          git -C $source remote add origin https://github.com/CyberDrain/CIPP.git
+          git -C $source fetch --depth 1 origin 8971c3fc6601fdfd30a9a31b35cffdb1ab67163b
+          if ($LASTEXITCODE -ne 0) { throw 'Official source fetch failed' }
+          git -C $source checkout --detach FETCH_HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Official source checkout failed' }
+          ./prepare-context.ps1 -OfficialSourceRoot $source -OutputRoot (Join-Path $env:RUNNER_TEMP 'reader-context')
+      - name: Bootstrap explicit container driver and build saved image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx create --name cipp-mailbox-reader --driver docker-container --use
+          docker buildx inspect cipp-mailbox-reader --bootstrap
+          context="$RUNNER_TEMP/reader-context"
+          artifact="$RUNNER_TEMP/reader-artifact"
+          mkdir -p "$artifact"
+          profile=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["readerProfileId"])' "$context/context-manifest.json")
+          [[ "$profile" =~ ^[a-f0-9]{64}$ ]]
+          docker buildx build --builder cipp-mailbox-reader --platform linux/amd64 --provenance=false --sbom=false --build-arg "READER_PROFILE_ID=$profile" --label org.opencontainers.image.source=https://github.com/manny026ai/cipp-mailbox-reader --label "org.opencontainers.image.revision=$REVIEWED_REF" --load --tag cipp-mailbox-reader:reviewed "$context"
+          docker save --output "$artifact/reader.docker.tar" cipp-mailbox-reader:reviewed
+          docker image inspect cipp-mailbox-reader:reviewed > "$artifact/image-inspect.json"
+          cp "$context/context-manifest.json" "$context/runtime/Config/mailbox-evidence-profile.json" "$artifact/"
+          git archive --format=tar.gz --output "$artifact/companion-source.tar.gz" "$REVIEWED_REF"
+          git -C "$RUNNER_TEMP/official-cipp" archive --format=tar.gz --output "$artifact/cipp-source.tar.gz" 8971c3fc6601fdfd30a9a31b35cffdb1ab67163b
+      - name: Record exact saved image and source checksums
+        id: record
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib
+          p = pathlib.Path(os.environ['RUNNER_TEMP'])/'reader-artifact'
+          def sha(file):
+              h = hashlib.sha256()
+              with open(file,'rb') as f:
+                  for chunk in iter(lambda:f.read(1048576),b''): h.update(chunk)
+              return h.hexdigest()
+          image = json.loads((p/'image-inspect.json').read_text())[0]
+          profile = json.loads((p/'mailbox-evidence-profile.json').read_text())
+          assert image['Os']=='linux' and image['Architecture']=='amd64'
+          labels = image['Config']['Labels']
+          assert labels['org.opencontainers.image.revision']==os.environ['REVIEWED_REF']
+          assert labels['org.opencontainers.image.source']=='https://github.com/manny026ai/cipp-mailbox-reader'
+          assert labels['io.clearhelm.cipp.reader-profile']==profile['readerProfileId']
+          manifest = json.loads((p/'context-manifest.json').read_text())
+          assert manifest['sourceCommit']=='8971c3fc6601fdfd30a9a31b35cffdb1ab67163b'
+          assert manifest['baseImageDigest']=='sha256:d03570ebcaf189df85e5b64497a40861ff3ab320e7ee1c90ec4c5b082a4c8b72'
+          assert manifest['buildImageDigest']=='sha256:6ba9644da07bb5b560a402acec9ca38711a0762969f1b61da261df5c9f6f85da'
+          record = dict(companionSourceCommit=os.environ['REVIEWED_REF'], imageConfigDigest=image['Id'], readerProfileId=profile['readerProfileId'], upstream=manifest['sourceCommit'], base=manifest['baseImageDigest'], sdk=manifest['buildImageDigest'], files={f.name:sha(f) for f in sorted(p.iterdir()) if f.is_file()})
+          (p/'build-record.json').write_text(json.dumps(record,indent=2)+'\n')
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:
+              f.write('source_ref='+os.environ['REVIEWED_REF']+'\narchive_sha='+record['files']['reader.docker.tar']+'\nimage_id='+image['Id']+'\nprofile_id='+profile['readerProfileId']+'\n')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: reader-review-${{ github.run_id }}
+          path: ${{ runner.temp }}/reader-artifact/
+          retention-days: 1
+          if-no-files-found: error
+
+  publish:
+    if: inputs.publish && github.repository == 'manny026ai/cipp-mailbox-reader'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/manny026ai/cipp-mailbox-reader
+      REVIEWED_REF: ${{ needs.build.outputs.source_ref }}
+      EXPECTED_ARCHIVE_SHA: ${{ needs.build.outputs.archive_sha }}
+      EXPECTED_IMAGE_ID: ${{ needs.build.outputs.image_id }}
+      EXPECTED_PROFILE_ID: ${{ needs.build.outputs.profile_id }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: reader-review-${{ github.run_id }}
+          path: ${{ runner.temp }}/reader-artifact/
+      - name: Verify and load the saved reviewed image without rebuilding
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$REVIEWED_REF" =~ ^[a-f0-9]{40}$ && "$EXPECTED_ARCHIVE_SHA" =~ ^[a-f0-9]{64}$ ]]
+          [[ "$EXPECTED_IMAGE_ID" =~ ^sha256:[a-f0-9]{64}$ && "$EXPECTED_PROFILE_ID" =~ ^[a-f0-9]{64}$ ]]
+          echo "$EXPECTED_ARCHIVE_SHA  $RUNNER_TEMP/reader-artifact/reader.docker.tar" | sha256sum --check --status
+          docker load --input "$RUNNER_TEMP/reader-artifact/reader.docker.tar"
+          [[ "$(docker image inspect cipp-mailbox-reader:reviewed --format '{{.Id}}')" == "$EXPECTED_IMAGE_ID" ]]
+          [[ "$(docker image inspect cipp-mailbox-reader:reviewed --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" == "$REVIEWED_REF" ]]
+          [[ "$(docker image inspect cipp-mailbox-reader:reviewed --format '{{index .Config.Labels "io.clearhelm.cipp.reader-profile"}}')" == "$EXPECTED_PROFILE_ID" ]]
+      - name: Authenticate only the publication job with its ephemeral workflow token
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish fixed destination and verify the registry digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="source-$REVIEWED_REF-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          docker tag cipp-mailbox-reader:reviewed "$IMAGE:$tag"
+          docker push "$IMAGE:$tag"
+          digest=$(docker image inspect "$IMAGE:$tag" --format '{{json .RepoDigests}}' | python3 -c 'import json,os,sys; refs=[x for x in json.load(sys.stdin) if x.startswith(os.environ["IMAGE"]+"@sha256:")]; assert len(refs)==1; print(refs[0].split("@",1)[1])')
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          docker pull --platform linux/amd64 "$IMAGE@$digest"
+          [[ "$(docker image inspect "$IMAGE@$digest" --format '{{.Id}}')" == "$EXPECTED_IMAGE_ID" ]]
+          mkdir -p "$RUNNER_TEMP/publication-record"
+          printf '%s\n' "$IMAGE@$digest" > "$RUNNER_TEMP/publication-record/published-image.txt"
+          cp "$RUNNER_TEMP/reader-artifact/build-record.json" "$RUNNER_TEMP/publication-record/"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: reader-publication-${{ github.run_id }}
+          path: ${{ runner.temp }}/publication-record/
+          retention-days: 1
+          if-no-files-found: error

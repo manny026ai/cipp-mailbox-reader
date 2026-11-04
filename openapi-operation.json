@@ -1,0 +1,314 @@
+{
+  "get": {
+    "x-cipp-role": "Exchange.Mailbox.Read",
+    "security": [
+      {
+        "bearerAuth": []
+      }
+    ],
+    "operationId": "ListMailboxPermissionEvidence",
+    "tags": [
+      "Email-Exchange > Administration"
+    ],
+    "summary": "Read structured exact shared-mailbox SendAs observations",
+    "description": "Four live native reads, no report cache. Direct observations do not establish effective access or approval.",
+    "parameters": [
+      {
+        "name": "tenantFilter",
+        "in": "query",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      {
+        "name": "mailbox",
+        "in": "query",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "maxLength": 254,
+          "description": "Exact canonical SMTP address on initial pass or native mailbox ExchangeGuid on subsequent pass."
+        }
+      },
+      {
+        "name": "subjectId",
+        "in": "query",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      }
+    ],
+    "responses": {
+      "200": {
+        "description": "Complete source reads, with unresolved native entries preserved",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "contract",
+                "profileId",
+                "source",
+                "tenantId",
+                "collectedAt",
+                "complete",
+                "mailbox",
+                "subject",
+                "commands",
+                "entries"
+              ],
+              "properties": {
+                "contract": {
+                  "type": "string",
+                  "const": "cipp-mailbox-evidence:v1"
+                },
+                "profileId": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                "source": {
+                  "type": "string",
+                  "const": "live_exchange"
+                },
+                "tenantId": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "collectedAt": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "complete": {
+                  "type": "boolean",
+                  "const": true
+                },
+                "mailbox": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "objectId",
+                    "exchangeGuid",
+                    "recipientGuid",
+                    "distinguishedName",
+                    "primarySmtpAddress",
+                    "type"
+                  ],
+                  "properties": {
+                    "objectId": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "exchangeGuid": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "recipientGuid": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "distinguishedName": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "maxLength": 1024
+                    },
+                    "primarySmtpAddress": {
+                      "type": "string",
+                      "format": "email",
+                      "maxLength": 254
+                    },
+                    "type": {
+                      "type": "string",
+                      "const": "SharedMailbox"
+                    }
+                  }
+                },
+                "subject": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "objectId",
+                    "recipientGuid",
+                    "sid",
+                    "primarySmtpAddress"
+                  ],
+                  "properties": {
+                    "objectId": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "recipientGuid": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "uuid"
+                    },
+                    "sid": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "maxLength": 184
+                    },
+                    "primarySmtpAddress": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "email",
+                      "maxLength": 254
+                    }
+                  }
+                },
+                "commands": {
+                  "type": "array",
+                  "minItems": 4,
+                  "maxItems": 4,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "name",
+                      "status",
+                      "httpStatus",
+                      "rowCount",
+                      "pageCount"
+                    ],
+                    "properties": {
+                      "name": {
+                        "type": "string",
+                        "enum": [
+                          "Get-Mailbox",
+                          "Get-Recipient",
+                          "Get-RecipientPermission"
+                        ]
+                      },
+                      "status": {
+                        "type": "string",
+                        "const": "complete"
+                      },
+                      "httpStatus": {
+                        "type": "integer",
+                        "const": 200
+                      },
+                      "rowCount": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 100
+                      },
+                      "pageCount": {
+                        "type": "integer",
+                        "const": 1
+                      }
+                    }
+                  }
+                },
+                "entries": {
+                  "type": "array",
+                  "maxItems": 100,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "targetIdentity",
+                      "trustee",
+                      "accessRights",
+                      "accessControlType",
+                      "isInherited",
+                      "inheritanceType"
+                    ],
+                    "properties": {
+                      "targetIdentity": {
+                        "type": "string",
+                        "maxLength": 1024
+                      },
+                      "trustee": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "maxLength": 256
+                      },
+                      "accessRights": {
+                        "type": "array",
+                        "maxItems": 8,
+                        "items": {
+                          "type": "string",
+                          "maxLength": 64
+                        }
+                      },
+                      "accessControlType": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "maxLength": 32
+                      },
+                      "isInherited": {
+                        "type": [
+                          "boolean",
+                          "null"
+                        ]
+                      },
+                      "inheritanceType": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "maxLength": 64
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "400": {
+        "description": "Invalid exact scope"
+      },
+      "422": {
+        "description": "No evidence retained; fixed reason only",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "code"
+              ],
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "enum": [
+                    "invalid_scope",
+                    "reader_denied",
+                    "reader_rate_limited",
+                    "tenant_unverified",
+                    "profile_unavailable",
+                    "reader_timeout",
+                    "reader_incomplete",
+                    "reader_pagination",
+                    "reader_limit",
+                    "identity_unverified",
+                    "target_unverified",
+                    "target_changed",
+                    "evidence_unavailable"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

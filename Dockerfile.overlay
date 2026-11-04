@@ -1,0 +1,23 @@
+# Manual, reviewed build only. Exact independently reviewed upstream SDK digest.
+FROM ghcr.io/cyberdrain/dotnet/sdk@sha256:6ba9644da07bb5b560a402acec9ca38711a0762969f1b61da261df5c9f6f85da AS modules
+COPY build/Metadata/1.5.7 /usr/local/share/powershell/Modules/Metadata/1.5.7
+COPY build/Configuration/1.6.0 /usr/local/share/powershell/Modules/Configuration/1.6.0
+COPY build/ModuleBuilder/3.1.8 /usr/local/share/powershell/Modules/ModuleBuilder/3.1.8
+COPY build/tools/build-single-module.ps1 /build/build-single-module.ps1
+COPY prepare-context.ps1 /build/prepare-context.ps1
+COPY backend/Modules/CIPPCore /src/CIPPCore
+COPY backend/Modules/CIPPHTTP /src/CIPPHTTP
+RUN pwsh -NoProfile -File /build/build-single-module.ps1 -Module CIPPCore
+RUN pwsh -NoProfile -File /build/build-single-module.ps1 -Module CIPPHTTP
+RUN pwsh -NoProfile -File /build/prepare-context.ps1 -Mode Validate -OfficialSourceRoot /src
+
+# Exact installed immutable base. Non-root distroless runtime; no final-stage RUN/shell/base upgrade.
+FROM ghcr.io/cyberdrain/cipp@sha256:d03570ebcaf189df85e5b64497a40861ff3ab320e7ee1c90ec4c5b082a4c8b72
+ARG READER_PROFILE_ID
+LABEL io.clearhelm.cipp.reader-profile="${READER_PROFILE_ID}"
+LABEL io.clearhelm.cipp.upstream-revision="8971c3fc6601fdfd30a9a31b35cffdb1ab67163b"
+COPY --from=modules --chown=app:app /src/CIPPCore/ /app/API/Modules/CIPPCore/
+COPY --from=modules --chown=app:app /src/CIPPHTTP/ /app/API/Modules/CIPPHTTP/
+COPY --chown=app:app runtime/Config/ /app/API/Config/
+COPY --chown=app:app runtime/Frontend/ /app/Frontend/
+COPY LICENSE.upstream.md /app/NOTICE.clearhelm-mailbox-reader-AGPL.txt
