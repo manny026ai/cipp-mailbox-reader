@@ -40,6 +40,16 @@
           "type": "string",
           "format": "uuid"
         }
+      },
+      {
+        "name": "_fresh",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{24}$",
+          "description": "Optional per-request value that only varies the URL so a host response cache never answers the read. Ignored by the reader."
+        }
       }
     ],
     "responses": {
